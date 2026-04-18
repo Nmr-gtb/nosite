@@ -62,17 +62,42 @@ PUBLIC_DATA_PATH = ROOT / "public" / "data.json"
 # ce que le fetch() de data.json interdit à cause du CORS des navigateurs.
 PUBLIC_DATA_JS = ROOT / "public" / "data.js"
 
-# Villes supportées en V1 (mapping nom → codes postaux). Extensible.
+# Villes supportées (mapping nom → codes postaux). Extensible à souhait.
 VILLES_SUPPORTEES = {
     "nice": ["06000", "06100", "06200", "06300"],
+    "cannes": ["06150", "06400"],
+    "antibes": ["06600", "06160"],  # 06160 couvre Juan-les-Pins et Cap-d'Antibes
 }
 
-# NAF par défaut (libellés mis à jour manuellement si on change la cible).
+# NAF cibles, ordonnés par code et groupés par thème pour la lisibilité.
+# L'ajout d'un code ne suffit PAS à le scanner : il faut qu'il corresponde
+# à la cible prospection (petites entreprises sans site web évident).
 NAF_LIBELLES = {
-    "68.31Z": "Agences immobilières",
-    "70.22Z": "Conseil pour les affaires et autres conseils de gestion",
-    "69.10Z": "Activités juridiques",
+    # --- Construction / BTP ---
     "41.20A": "Construction de maisons individuelles",
+    "43.21A": "Travaux d'installation électrique dans tous locaux",
+    "43.22A": "Travaux d'installation d'eau et de gaz en tous locaux",
+    "43.31Z": "Travaux de plâtrerie",
+    "43.32A": "Travaux de menuiserie bois et PVC",
+    "43.33Z": "Travaux de revêtement des sols et des murs",
+    "43.34Z": "Travaux de peinture et vitrerie",
+    # --- Commerce de détail ---
+    "47.71Z": "Commerce de détail d'habillement en magasin spécialisé",
+    "47.72A": "Commerce de détail de la chaussure",
+    "47.75Z": "Commerce de détail de parfumerie et de produits de beauté en magasin spécialisé",
+    "47.78C": "Autres commerces de détail spécialisés divers",
+    # --- Restauration ---
+    "56.10A": "Restauration traditionnelle",
+    "56.10B": "Cafétérias et autres libres-services",
+    "56.10C": "Restauration de type rapide",
+    "56.30Z": "Débits de boissons",
+    # --- Immobilier & conseil ---
+    "68.31Z": "Agences immobilières",
+    "69.10Z": "Activités juridiques",
+    "70.22Z": "Conseil pour les affaires et autres conseils de gestion",
+    # --- Beauté ---
+    "96.02A": "Coiffure",
+    "96.02B": "Soins de beauté",
 }
 
 # Codes NAF définitivement exclus de la cible par défaut.
@@ -114,8 +139,13 @@ def parser() -> argparse.ArgumentParser:
                    help="Utilise la V1 (DNS probing) au lieu de Serper.")
     p.add_argument("--limit-serper", type=int, default=None,
                    help="Plafond d'appels Serper cette exécution.")
-    p.add_argument("--ville", default="nice",
-                   help="Ville cible (V1 : 'nice' uniquement).")
+    p.add_argument(
+        "--ville", default="nice",
+        help=(
+            "Ville(s) cible(s). Valeurs acceptées : nice, cannes, antibes, "
+            "ou CSV (ex: 'nice,cannes,antibes'), ou 'all' pour tout."
+        ),
+    )
     p.add_argument("--naf", default=None,
                    help="CSV de codes NAF pour override (ex: '68.31Z,70.22Z').")
     p.add_argument("--enable-pappers", action="store_true",
@@ -129,13 +159,36 @@ def parser() -> argparse.ArgumentParser:
     return p
 
 
-def resoudre_codes_postaux(ville: str) -> list[str]:
-    ville_norm = ville.strip().lower()
-    if ville_norm not in VILLES_SUPPORTEES:
-        print(f"❌ Ville non supportée : {ville!r}")
-        print(f"   Valeurs acceptées V1 : {', '.join(VILLES_SUPPORTEES)}")
+def resoudre_codes_postaux(ville_arg: str) -> tuple[list[str], list[str]]:
+    """
+    Retourne (codes_postaux_union, villes_resolues).
+
+    Accepte :
+      - 'nice' → 1 ville
+      - 'cannes,antibes' → plusieurs villes (union des codes postaux)
+      - 'all' → toutes les villes supportées
+    """
+    ville_norm = ville_arg.strip().lower()
+
+    if ville_norm == "all":
+        villes_demandees = list(VILLES_SUPPORTEES.keys())
+    else:
+        villes_demandees = [v.strip().lower() for v in ville_norm.split(",") if v.strip()]
+
+    invalides = [v for v in villes_demandees if v not in VILLES_SUPPORTEES]
+    if invalides:
+        print(f"❌ Ville(s) non supportée(s) : {', '.join(invalides)}")
+        print(f"   Valeurs acceptées : {', '.join(VILLES_SUPPORTEES)} (ou 'all')")
         sys.exit(1)
-    return VILLES_SUPPORTEES[ville_norm]
+
+    # Union des codes postaux (dédupliquée, ordre stable)
+    codes_postaux: list[str] = []
+    for v in villes_demandees:
+        for cp in VILLES_SUPPORTEES[v]:
+            if cp not in codes_postaux:
+                codes_postaux.append(cp)
+
+    return codes_postaux, villes_demandees
 
 
 def resoudre_codes_naf(naf_csv: str | None) -> list[tuple[str, str]]:
@@ -260,7 +313,11 @@ def compacter_pour_front(entreprise: dict, pappers_cache: dict) -> dict:
     }
 
 
-def generer_public_data_json(codes_postaux: list[str], codes_naf: list[tuple[str, str]]) -> dict:
+def generer_public_data_json(
+    codes_postaux: list[str],
+    codes_naf: list[tuple[str, str]],
+    villes_resolues: list[str],
+) -> dict:
     """Lit shortlist.json + cache Pappers, écrit public/data.json."""
     if not SHORTLIST_PATH.exists():
         print(f"❌ Fichier introuvable : {SHORTLIST_PATH}")
@@ -285,6 +342,7 @@ def generer_public_data_json(codes_postaux: list[str], codes_naf: list[tuple[str
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "perimetre": {
+            "villes": villes_resolues,
             "codes_postaux": codes_postaux,
             "codes_naf": [{"code": c, "libelle": l} for c, l in codes_naf],
         },
@@ -328,14 +386,14 @@ def main() -> int:
         print("❌ --enable-pappers et --no-pappers sont incompatibles.")
         return 1
 
-    codes_postaux = resoudre_codes_postaux(args.ville)
+    codes_postaux, villes_resolues = resoudre_codes_postaux(args.ville)
     codes_naf = resoudre_codes_naf(args.naf)
     pappers_active = args.enable_pappers and not args.no_pappers
 
     mode_detection = "V1 DNS (legacy)" if args.legacy_dns else "V2 Serper"
-    print(f"🚀 Nosite pipeline · {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"   Ville         : {args.ville} ({', '.join(codes_postaux)})")
-    print(f"   NAF           : {', '.join(c for c, _ in codes_naf)}")
+    print(f"🚀 Nosite pipeline V2.1 · {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"   Ville(s)      : {', '.join(villes_resolues)} ({len(codes_postaux)} CP)")
+    print(f"   NAF           : {', '.join(c for c, _ in codes_naf)} ({len(codes_naf)} codes)")
     print(f"   Détection     : {mode_detection}")
     print(f"   Pappers       : {'ACTIVÉ' if pappers_active else 'désactivé (défaut)'}")
     if args.dry_run:
@@ -396,7 +454,7 @@ def main() -> int:
 
     # Étape 5b — public/data.json
     entete("Étape 5b · Génération public/data.json")
-    payload = generer_public_data_json(codes_postaux, codes_naf)
+    payload = generer_public_data_json(codes_postaux, codes_naf, villes_resolues)
 
     # Récap final
     r = payload["repartition"]
