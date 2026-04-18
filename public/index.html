@@ -7,10 +7,10 @@
   <meta name="robots" content="noindex, nofollow">
   <title>Nosite — Prospection Nice</title>
 
-  <!-- Google Fonts : Inter -->
+  <!-- Google Fonts : Inter + Instrument Serif (titre) + JetBrains Mono (data) -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 
   <!-- Leaflet CSS -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
@@ -49,11 +49,8 @@
     <aside class="sidebar" aria-label="Filtres et liste des prospects">
 
       <header class="sidebar-header">
-        <div class="brand">
-          <span class="brand-dot" aria-hidden="true"></span>
-          <h1 class="brand-name">Nosite</h1>
-        </div>
-        <p class="sidebar-sub">Prospection Nice · <span id="compteur-visible">0</span> / <span id="compteur-total">0</span> entreprises</p>
+        <h1 class="brand-name">Nosite</h1>
+        <p class="sidebar-sub">Prospection Nice · <span class="sidebar-sub-num" id="compteur-visible">0</span> / <span class="sidebar-sub-num" id="compteur-total">0</span> entreprises</p>
       </header>
 
       <div class="sidebar-controls">

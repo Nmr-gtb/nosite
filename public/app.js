@@ -13,13 +13,16 @@
   const CONFIG = {
     NICE_CENTER: [43.7102, 7.2620],
     NICE_ZOOM: 12,
-    TILE_URL: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+    // DÉCISION: tuiles Carto Positron (light_all) pour matcher le design clair premium
+    TILE_URL: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
     TILE_ATTR: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
     STORAGE_KEY: 'nosite_user_data_v1',
     FETCH_TIMEOUT_MS: 10000,   // 10 s pour télécharger le Gist
     FETCH_RETRIES: 1,          // 1 retry après échec réseau
     FETCH_RETRY_DELAY_MS: 1000,
     CONFIG_PLACEHOLDER: 'A_REMPLACER_APRES_CREATION_GIST',
+    // Score max observé sur le dataset (utilisé pour la barre dans le tooltip)
+    SCORE_MAX: 174,
   };
 
   // Types d'erreur pour affichage différencié
@@ -333,16 +336,16 @@
       subdomains: 'abcd',
     }).addTo(state.map);
 
-    // Cluster custom (style sombre + taille dynamique)
+    // Cluster custom (fond blanc, bordure noire, taille dynamique)
     state.cluster = L.markerClusterGroup({
       showCoverageOnHover: false,
       maxClusterRadius: 48,
       iconCreateFunction: (cluster) => {
         const n = cluster.getChildCount();
-        const size = n < 10 ? 32 : n < 50 ? 40 : 48;
+        const size = n < 10 ? 32 : n < 100 ? 40 : 48;
         return L.divIcon({
-          html: `<div>${n}</div>`,
-          className: 'marker-cluster-custom',
+          html: `<div class="nosite-cluster" style="width:${size}px;height:${size}px">${n}</div>`,
+          className: 'nosite-cluster-wrapper',
           iconSize: [size, size],
         });
       },
@@ -353,49 +356,79 @@
     // Construire tous les markers une fois ; visibilité pilotée par filtres
     state.entreprises.forEach(ent => {
       if (ent.lat == null || ent.lng == null) return; // skip si pas de géoloc
+      const user = getUser(ent.siren);
       const marker = L.marker([ent.lat, ent.lng], {
-        icon: creerIcone(ent.classification, false),
+        icon: creerIcone(ent.classification, false, user.contacte),
+        riseOnHover: true,
         // DÉCISION: on garde les markers cliquables même à l'intérieur d'un
         // cluster — markercluster par défaut le fait via spiderfy (éclatement
         // au clic sur le cluster), on ne désactive pas cette fonctionnalité.
       });
-      marker.on('click', () => {
-        selectionner(ent.siren, { centrer: false, ouvrirFiche: false });
-        marker.openPopup();
+      // Tooltip hover — c'est LE moment "wow" du produit : nom + NAF + barre de score
+      marker.bindTooltip(buildTooltipHTML(ent), {
+        direction: 'top',
+        offset: [0, -8],
+        className: 'nosite-tooltip',
+        opacity: 1,
       });
-      marker.bindPopup(() => htmlPopup(ent));
+      // Clic marker → ouvre direct le panel détaillé (plus de popup intermédiaire)
+      marker.on('click', () => {
+        selectionner(ent.siren, { centrer: false, ouvrirFiche: true });
+      });
       marker._nosite_ent = ent;
       state.markersBySiren.set(ent.siren, marker);
     });
   }
 
-  function creerIcone(classification, selected) {
+  // DÉCISION: trois tailles de marker selon la classification pour hiérarchiser
+  // visuellement la carte. Les "contactées" reçoivent un style dédié (pointillé
+  // + opacité réduite) au lieu d'être masquées — elles restent visibles mais
+  // en retrait.
+  function creerIcone(classification, selected, contacted) {
+    const size = classification === 'TRÈS PROBABLE' ? 14 : 12;
     const cls = CLASSIF_KEY[classification] || 'a-verifier';
+    const modifiers = [
+      `nosite-marker--${cls}`,
+      contacted ? 'is-contacted' : '',
+      selected ? 'is-selected' : '',
+    ].filter(Boolean).join(' ');
     return L.divIcon({
-      className: '', // on met tout dans le html pour éviter le style par défaut
-      html: `<div class="map-marker marker-${cls}${selected ? ' is-selected' : ''}"></div>`,
-      iconSize: [20, 20],
+      className: 'nosite-marker-wrapper',
+      html: `<div class="nosite-marker ${modifiers}" style="width:${size}px;height:${size}px"></div>`,
+      iconSize: [size, size],
+      iconAnchor: [size / 2, size / 2],
     });
   }
 
-  function htmlPopup(ent) {
-    return `
-      <div class="popup-name">${escapeHtml(ent.nom)}</div>
-      <div class="popup-meta">
-        <span class="badge badge-${CLASSIF_KEY[ent.classification]}">${ent.classification}</span>
-        · ${escapeHtml(ent.naf?.code || '')}
-      </div>
-      <button type="button" class="popup-btn" data-siren="${ent.siren}">Voir détails</button>
-    `;
+  // Rafraîchit l'icône d'un marker pour refléter l'état courant (contacté, sélectionné).
+  // Utilisé à chaque fois que l'utilisateur coche/décoche "contactée".
+  function rafraichirMarker(siren) {
+    const marker = state.markersBySiren.get(siren);
+    const ent = state.entreprises.find(e => e.siren === siren);
+    if (!marker || !ent) return;
+    const selected = state.selectedSiren === siren;
+    marker.setIcon(creerIcone(ent.classification, selected, getUser(siren).contacte));
   }
 
-  // Délégation pour le bouton "Voir détails" injecté dans la popup
-  document.addEventListener('click', (e) => {
-    const btn = e.target.closest('.popup-btn[data-siren]');
-    if (btn) {
-      selectionner(btn.dataset.siren, { centrer: true, ouvrirFiche: true });
-    }
-  });
+  // Tooltip custom — inspiration Cobe Globe : nom + NAF + barre de score colorée
+  function buildTooltipHTML(ent) {
+    const pct = Math.min(100, Math.round((ent.score / CONFIG.SCORE_MAX) * 100));
+    const color = ent.classification === 'TRÈS PROBABLE' ? '#16A34A'
+                : ent.classification === 'PROBABLE' ? '#CA8A04'
+                : '#737373';
+    return `
+      <div class="nosite-tooltip-inner">
+        <div class="nosite-tooltip-naf">${escapeHtml(ent.naf?.libelle || '')}</div>
+        <div class="nosite-tooltip-name">${escapeHtml(ent.nom)}</div>
+        <div class="nosite-tooltip-score-row">
+          <div class="nosite-tooltip-bar">
+            <div class="nosite-tooltip-bar-fill" style="width: ${pct}%; background: ${color};"></div>
+          </div>
+          <div class="nosite-tooltip-score">${ent.score}pt</div>
+        </div>
+      </div>
+    `;
+  }
 
   // --------------------------------------------------------
   // Liste (construction puis filtrage)
@@ -426,6 +459,7 @@
           date_contact: contacte ? new Date().toISOString() : getUser(ent.siren).date_contact,
         });
         li.classList.toggle('contacted', contacte);
+        rafraichirMarker(ent.siren);
         if (state.selectedSiren === ent.siren) rendreFiche(ent);
         if (state.filters.hideContacted) appliquerFiltres();
       });
@@ -521,11 +555,11 @@
 
     // Déselection précédente
     if (state.selectedSiren && state.selectedSiren !== siren) {
+      const prevEnt = state.entreprises.find(e => e.siren === state.selectedSiren);
       const prev = state.markersBySiren.get(state.selectedSiren);
-      if (prev) prev.setIcon(creerIcone(
-        state.entreprises.find(e => e.siren === state.selectedSiren)?.classification,
-        false,
-      ));
+      if (prev && prevEnt) {
+        prev.setIcon(creerIcone(prevEnt.classification, false, getUser(prevEnt.siren).contacte));
+      }
       const prevLi = state.listItemsBySiren.get(state.selectedSiren);
       if (prevLi) prevLi.classList.remove('active');
     }
@@ -540,12 +574,11 @@
 
     const marker = state.markersBySiren.get(siren);
     if (marker) {
-      marker.setIcon(creerIcone(ent.classification, true));
+      marker.setIcon(creerIcone(ent.classification, true, getUser(siren).contacte));
       if (centrer && ent.lat != null && ent.lng != null) {
         // Si le marker est dans un cluster, zoom dessus pour l'afficher
         state.cluster.zoomToShowLayer(marker, () => {
           state.map.setView([ent.lat, ent.lng], Math.max(state.map.getZoom(), 15), { animate: true });
-          marker.openPopup();
         });
       }
     }
@@ -687,6 +720,7 @@
         const cb = li.querySelector('input[type="checkbox"]');
         if (cb) cb.checked = nouveauContacte;
       }
+      rafraichirMarker(ent.siren);
       rendreFiche(ent);
       if (state.filters.hideContacted) appliquerFiltres();
     });
