@@ -1,0 +1,15 @@
+.env
+.venv/
+data/cache/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Données sensibles — hébergées dans un Gist privé, pas dans le repo public.
+# Le script génère ces fichiers localement via `python src/main.py`.
+data/raw_entreprises.json
+data/entreprises_avec_dns.json
+data/shortlist.json
+data/scored_final.json
+public/data.json
+public/data.js
