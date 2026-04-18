@@ -1,15 +1,23 @@
 """
-Étape 4 — Scoring et classification V1 (sans Pappers).
+Étape 4 — Scoring et classification.
 
-Barème exclusivement basé sur DNS + effectif :
-- DNS variantes testées, 0 résolu, effectif ≥ tranche 11 (~10+ sal.) → TRÈS PROBABLE
-- DNS variantes testées, 0 résolu, effectif < tranche 11            → PROBABLE
-- DNS indéterminé (aucune variante générable à partir du nom)       → À VÉRIFIER
-- DNS au moins un domaine résolu                                     → ÉCARTÉ
+V2 (par défaut) — priorité au verdict Serper :
+- Serper : site détecté                                     → ÉCARTÉ
+- Serper : aucun site + effectif ≥ tranche 11 (~10+ sal.)   → TRÈS PROBABLE
+- Serper : aucun site + effectif < tranche 11               → PROBABLE
+- Serper : entreprise non traitée (quota/limit)             → À VÉRIFIER
 
-Pappers est désactivé en V1 pour préserver les 67 crédits restants (coût
-réel mesuré : ~7 crédits par appel avec les contacts). Voir le README.
+V1 legacy (fallback si --legacy-dns, pas de `_site` sur les entreprises) :
+- DNS variantes testées, 0 résolu, effectif ≥ tranche 11 → TRÈS PROBABLE
+- DNS variantes testées, 0 résolu, effectif < tranche 11 → PROBABLE
+- DNS indéterminé (aucune variante générable)            → À VÉRIFIER
+- DNS au moins un domaine résolu                          → ÉCARTÉ
 
+Pappers reste désactivé par défaut pour préserver les crédits (voir README).
+
+Entrée :
+  - data/entreprises_avec_site.json   (V2, priorité)
+  - data/entreprises_avec_dns.json    (fallback legacy)
 Sortie : data/shortlist.json.
 """
 from __future__ import annotations
@@ -20,7 +28,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-INPUT_PATH = ROOT / "data" / "entreprises_avec_dns.json"
+INPUT_PATH_SERPER = ROOT / "data" / "entreprises_avec_site.json"
+INPUT_PATH_DNS = ROOT / "data" / "entreprises_avec_dns.json"
 OUTPUT_PATH = ROOT / "data" / "shortlist.json"
 
 # Effectif moyen par tranche INSEE (sert aussi au tri par taille)
@@ -51,10 +60,45 @@ def effectif_estime(entreprise: dict) -> float:
 
 def classifier(entreprise: dict) -> tuple[str, int, list[dict]]:
     """Retourne (classification, score_affichage, signaux)."""
+    site = entreprise.get("_site") or {}
     dns = entreprise.get("_dns") or {}
+    eff = effectif_estime(entreprise)
+
+    # --- V2 : verdict Serper prioritaire si présent ---
+    if site:
+        reason = site.get("reason") or ""
+
+        # Entreprise non traitée (quota Serper épuisé ou --limit atteint).
+        # On ne peut pas trancher → À VÉRIFIER plutôt qu'un faux positif.
+        if reason.startswith("Non traité"):
+            signal = {
+                "source": "Serper",
+                "verdict": "non_traite",
+                "detail": reason,
+            }
+            classification = "À VÉRIFIER"
+            return classification, SCORE_AFFICHAGE[classification] + int(eff), [signal]
+
+        if site.get("has_site", False):
+            signal = {
+                "source": "Serper",
+                "verdict": "site_detecte",
+                "detail": f"Site trouvé : {site.get('detected_domain', '—')}",
+            }
+            classification = "ÉCARTÉ"
+            return classification, SCORE_AFFICHAGE[classification] + int(eff), [signal]
+
+        signal = {
+            "source": "Serper",
+            "verdict": "aucun_site",
+            "detail": reason or "Aucun site détecté par recherche Google",
+        }
+        classification = "TRÈS PROBABLE" if eff >= SEUIL_GROSSE else "PROBABLE"
+        return classification, SCORE_AFFICHAGE[classification] + int(eff), [signal]
+
+    # --- V1 legacy : fallback DNS (utilisé si --legacy-dns) ---
     testes = dns.get("domaines_testes") or []
     resolus = dns.get("domaines_resolus") or []
-    eff = effectif_estime(entreprise)
 
     if resolus:
         signal = {
@@ -82,6 +126,16 @@ def classifier(entreprise: dict) -> tuple[str, int, list[dict]]:
     # deux entreprises de même classification.
     score = SCORE_AFFICHAGE[classification] + int(eff)
     return classification, score, [signal]
+
+
+def detecter_mode(entreprises: list[dict]) -> str:
+    """Retourne 'serper' si au moins une entreprise a un verdict _site, sinon 'dns'."""
+    for e in entreprises:
+        if e.get("_site"):
+            return "serper"
+        if e.get("_dns"):
+            return "dns"
+    return "serper"
 
 
 def scorer(entreprises: list[dict]) -> None:
@@ -125,12 +179,23 @@ def stats(entreprises: list[dict]) -> dict[str, int]:
     return r
 
 
-def sauvegarder(entreprises: list[dict]) -> None:
+def sauvegarder(entreprises: list[dict], mode: str) -> None:
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "date": datetime.now(timezone.utc).isoformat(),
-        "bareme": {
-            "mode": "V1 — DNS + effectif (Pappers désactivé)",
+    if mode == "serper":
+        bareme = {
+            "mode": "V2 — Serper (Google) + effectif",
+            "seuil_grosse_entreprise": SEUIL_GROSSE,
+            "regles": [
+                "Serper : site détecté → ÉCARTÉ",
+                "Serper : aucun site + effectif ≥ 10 sal. → TRÈS PROBABLE",
+                "Serper : aucun site + effectif < 10 sal. → PROBABLE",
+                "Serper : entreprise non traitée (quota/limit) → À VÉRIFIER",
+                "(fallback V1 DNS si --legacy-dns)",
+            ],
+        }
+    else:
+        bareme = {
+            "mode": "V1 legacy — DNS + effectif",
             "seuil_grosse_entreprise": SEUIL_GROSSE,
             "regles": [
                 "DNS : 0 résolu + effectif ≥ 10 sal. → TRÈS PROBABLE",
@@ -138,7 +203,10 @@ def sauvegarder(entreprises: list[dict]) -> None:
                 "DNS : aucune variante générable → À VÉRIFIER",
                 "DNS : au moins un domaine résolu → ÉCARTÉ",
             ],
-        },
+        }
+    payload = {
+        "date": datetime.now(timezone.utc).isoformat(),
+        "bareme": bareme,
         "repartition": stats(entreprises),
         "nombre_entreprises": len(entreprises),
         "entreprises": entreprises,
@@ -147,21 +215,41 @@ def sauvegarder(entreprises: list[dict]) -> None:
         json.dump(payload, f, ensure_ascii=False, indent=2)
 
 
-def main() -> int:
-    if not INPUT_PATH.exists():
-        print(f"❌ Fichier introuvable : {INPUT_PATH}")
-        print("   Lance d'abord : python src/check_dns.py")
+def main(legacy: bool = False) -> int:
+    """
+    Charge et classe les entreprises.
+
+    `legacy=True` force la lecture de entreprises_avec_dns.json (mode V1).
+    Sinon, préfère entreprises_avec_site.json (V2), fallback DNS si absent.
+    """
+    if legacy:
+        if INPUT_PATH_DNS.exists():
+            input_path = INPUT_PATH_DNS
+        else:
+            print(f"❌ Mode legacy demandé mais {INPUT_PATH_DNS.name} introuvable.")
+            print(f"   Lance d'abord : python src/check_dns.py")
+            return 1
+    elif INPUT_PATH_SERPER.exists():
+        input_path = INPUT_PATH_SERPER
+    elif INPUT_PATH_DNS.exists():
+        input_path = INPUT_PATH_DNS
+    else:
+        print(f"❌ Aucun fichier d'entrée trouvé.")
+        print(f"   Lance d'abord : python src/detect_website.py (ou check_dns.py en legacy)")
         return 1
 
-    with INPUT_PATH.open("r", encoding="utf-8") as f:
+    with input_path.open("r", encoding="utf-8") as f:
         data = json.load(f)
     entreprises = data["entreprises"]
 
-    print(f"📥 {len(entreprises)} entreprises chargées")
+    mode = detecter_mode(entreprises)
+    print(f"📥 {len(entreprises)} entreprises chargées depuis {input_path.name}")
+    print(f"   Mode scoring : {'V2 Serper' if mode == 'serper' else 'V1 legacy DNS'}")
+
     scorer(entreprises)
     entreprises.sort(key=cle_tri)
     marquer_retenus_pappers(entreprises, LIMIT_TOP_PAPPERS)
-    sauvegarder(entreprises)
+    sauvegarder(entreprises, mode)
 
     r = stats(entreprises)
     print("\n📊 Classification")

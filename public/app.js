@@ -416,6 +416,11 @@
     const color = ent.classification === 'TRÈS PROBABLE' ? '#16A34A'
                 : ent.classification === 'PROBABLE' ? '#CA8A04'
                 : '#737373';
+    // Ceinture de sécurité : si une entrée est dans la base avec un site
+    // détecté (V2), on le signale dans le tooltip même si elle est visible.
+    const siteLine = ent.site?.detected_url
+      ? `<div class="nosite-tooltip-note">⚠️ Site détecté (à vérifier)</div>`
+      : '';
     return `
       <div class="nosite-tooltip-inner">
         <div class="nosite-tooltip-naf">${escapeHtml(ent.naf?.libelle || '')}</div>
@@ -426,6 +431,7 @@
           </div>
           <div class="nosite-tooltip-score">${ent.score}pt</div>
         </div>
+        ${siteLine}
       </div>
     `;
   }
@@ -603,20 +609,40 @@
     $('#detail-panel').setAttribute('aria-hidden', 'true');
   }
 
-  function rendreFiche(ent) {
-    const content = $('#detail-content');
-    const user = getUser(ent.siren);
-    const p = ent.pappers || {};
-    const dirigeant = p.dirigeant || (ent.dirigeants_recherche && ent.dirigeants_recherche[0]) || null;
-    const siret = ent.dns?.siret || (ent.siren ? ent.siren + ' (SIRET siège non exposé dans data.json)' : '—');
+  // Section "DÉTECTION SITE WEB" (V2 Serper). Fallback DNS (V1) si pas de `site`.
+  function renderSiteSection(ent) {
+    const site = ent.site;
+    if (!site) {
+      // Mode legacy DNS : on affiche la section DNS si disponible, sinon rien.
+      return ent.dns ? renderDnsSection(ent) : '';
+    }
 
-    const telHref = p.telephone ? `tel:${p.telephone.replace(/\s+/g, '')}` : null;
-    const mailHref = p.email ? `mailto:${p.email}` : null;
+    const hasSite = !!site.has_site;
+    const icon = hasSite ? '🌐' : '🚫';
+    const ligneStatut = hasSite
+      ? `<strong>Site détecté :</strong> <a href="${escapeHtml(site.detected_url || '')}" target="_blank" rel="noopener noreferrer">${escapeHtml(site.detected_domain || site.detected_url || '')}</a>`
+      : `<strong>Aucun site web détecté</strong> — prospect qualifié.`;
+    const ligneRaison = site.reason
+      ? `<div class="site-reason">${escapeHtml(site.reason)}</div>`
+      : '';
+    const ligneQuery = site.query_used
+      ? `<div class="site-query">Requête Google : <code>${escapeHtml(site.query_used)}</code></div>`
+      : '';
 
-    const gmapsQuery = encodeURIComponent(`${ent.nom} ${ent.adresse || ''}`);
-    const gmapsUrl = `https://www.google.com/maps/search/?api=1&query=${gmapsQuery}`;
-    const pappersUrl = `https://www.pappers.fr/entreprise/${ent.siren}`;
+    return `
+      <div class="detail-section detail-site">
+        <h3>Détection site web</h3>
+        <div class="site-verdict ${hasSite ? 'site-has' : 'site-none'}">
+          ${icon} ${ligneStatut}
+        </div>
+        ${ligneRaison}
+        ${ligneQuery}
+      </div>
+    `;
+  }
 
+  // Legacy : section "SIGNAUX DNS" conservée pour le mode --legacy-dns.
+  function renderDnsSection(ent) {
     const dnsResolus = (ent.dns?.domaines_resolus || []).map(d =>
       `<span class="chip ok">${escapeHtml(d)}</span>`
     ).join('');
@@ -624,6 +650,35 @@
       .filter(d => !(ent.dns?.domaines_resolus || []).includes(d))
       .map(d => `<span class="chip ko">${escapeHtml(d)}</span>`)
       .join('');
+
+    return `
+      <div class="detail-section">
+        <h3>Signaux DNS</h3>
+        <div class="dns-list">
+          ${dnsResolus || '<span style="color:var(--text-muted);font-size:12px">Aucun domaine résolu — probable absence de site web.</span>'}
+        </div>
+        ${dnsKo ? `
+          <div style="margin-top:10px">
+            <div style="font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px">Variantes testées</div>
+            <div class="dns-list">${dnsKo}</div>
+          </div>
+        ` : ''}
+      </div>
+    `;
+  }
+
+  function rendreFiche(ent) {
+    const content = $('#detail-content');
+    const user = getUser(ent.siren);
+    const p = ent.pappers || {};
+    const dirigeant = p.dirigeant || (ent.dirigeants_recherche && ent.dirigeants_recherche[0]) || null;
+
+    const telHref = p.telephone ? `tel:${p.telephone.replace(/\s+/g, '')}` : null;
+    const mailHref = p.email ? `mailto:${p.email}` : null;
+
+    const gmapsQuery = encodeURIComponent(`${ent.nom} ${ent.adresse || ''}`);
+    const gmapsUrl = `https://www.google.com/maps/search/?api=1&query=${gmapsQuery}`;
+    const pappersUrl = `https://www.pappers.fr/entreprise/${ent.siren}`;
 
     const dirigeantHtml = dirigeant
       ? `${escapeHtml(dirigeant.nom || '')}${dirigeant.qualite ? ' <span style="color:var(--text-muted)">— ' + escapeHtml(dirigeant.qualite) + '</span>' : ''}`
@@ -674,18 +729,7 @@
         </dl>
       </div>
 
-      <div class="detail-section">
-        <h3>Signaux DNS</h3>
-        <div class="dns-list">
-          ${dnsResolus || '<span style="color:var(--text-muted);font-size:12px">Aucun domaine résolu — probable absence de site web.</span>'}
-        </div>
-        ${dnsKo ? `
-          <div style="margin-top:10px">
-            <div style="font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px">Variantes testées</div>
-            <div class="dns-list">${dnsKo}</div>
-          </div>
-        ` : ''}
-      </div>
+      ${renderSiteSection(ent)}
 
       <div class="detail-section">
         <h3>Actions</h3>

@@ -1,30 +1,41 @@
 """
-Étape 6 — Orchestrateur V1 du pipeline Nosite.
+Étape 6 — Orchestrateur V2 du pipeline Nosite.
 
 Enchaîne :
-  1. extract.py    — API Recherche Entreprises
-  2. check_dns.py  — DNS probing async
-  3. score.py      — classification DNS + effectif
+  1. extract.py            — API Recherche Entreprises
+  2. detect_website.py     — recherche Google via Serper (défaut V2)
+     ou check_dns.py       — DNS probing async (fallback via --legacy-dns)
+  3. score.py              — classification selon le verdict Serper (ou DNS)
   4. (optionnel) enrich_pappers.py — seulement si --enable-pappers
   5. génération de public/data.json pour le frontend
+
+CHANGEMENTS V2
+──────────────
+- Serper remplace le DNS probing comme source de vérité pour la détection.
+- Le NAF 69.10Z (Activités juridiques) est exclu par défaut : les notaires
+  et avocats ont systématiquement un site via leurs ordres professionnels.
+  Pour le réactiver, passer `--naf 69.10Z` explicitement.
+- Mode legacy DNS disponible via `--legacy-dns` au cas où Serper serait
+  indisponible.
 
 POURQUOI PAPPERS EST DÉSACTIVÉ PAR DÉFAUT
 ─────────────────────────────────────────
 Mesuré empiriquement : un appel /v2/entreprise avec les contacts
 (telephone + email) coûte ~7 jetons. Sur 80 SIREN, ça dépasse le quota
-gratuit de 100. On garde les 67 crédits restants en réserve pour
-enrichir manuellement les leads ultra-chauds. Réactive ponctuellement
-avec --enable-pappers --limit-pappers N.
+gratuit de 100. On garde les crédits en réserve pour enrichir
+manuellement les leads ultra-chauds. Réactive ponctuellement avec
+--enable-pappers --limit-pappers N.
 
 USAGE
 ─────
-  python src/main.py                       # Pipeline complet V1 (Nice, 4 NAF)
-  python src/main.py --dry-run             # Simulation, rien n'est écrit
-  python src/main.py --skip-extract        # Réutilise l'extraction existante
-  python src/main.py --skip-extract --skip-dns
+  python src/main.py                             # Pipeline V2 complet (Serper)
+  python src/main.py --dry-run                   # Simulation, rien n'est écrit
+  python src/main.py --skip-extract              # Réutilise l'extraction
+  python src/main.py --skip-extract --skip-site  # Réutilise aussi la détection
+  python src/main.py --limit-serper 20           # Plafonne à 20 appels Serper
+  python src/main.py --legacy-dns                # Fallback V1 (DNS)
   python src/main.py --enable-pappers --limit-pappers 5 --yes
-  python src/main.py --ville nice          # (V1 : seule valeur supportée)
-  python src/main.py --naf 68.31Z,70.22Z   # override des NAF
+  python src/main.py --naf 68.31Z,70.22Z         # Override des NAF
 
 """
 from __future__ import annotations
@@ -64,6 +75,13 @@ NAF_LIBELLES = {
     "41.20A": "Construction de maisons individuelles",
 }
 
+# Codes NAF définitivement exclus de la cible par défaut.
+# Les ordres professionnels (notaires, avocats, huissiers) couvrent
+# systématiquement ces secteurs avec des sites web via leurs portails
+# (notaires.fr, avocat.fr). Pour les inclure explicitement, passer
+# `--naf 69.10Z` sur la ligne de commande.
+NAF_EXCLUS = {"69.10Z"}
+
 # Contacts manuellement récupérés pendant le diagnostic de l'étape 5.
 # Ces valeurs ont déjà été facturées côté Pappers — on évite de les perdre.
 CONTACTS_MANUELS = {
@@ -89,7 +107,13 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--skip-extract", action="store_true",
                    help="Réutilise data/raw_entreprises.json existant.")
     p.add_argument("--skip-dns", action="store_true",
-                   help="Réutilise data/entreprises_avec_dns.json existant.")
+                   help="(Legacy) réutilise data/entreprises_avec_dns.json existant.")
+    p.add_argument("--skip-site", action="store_true",
+                   help="Réutilise le fichier de détection de site existant.")
+    p.add_argument("--legacy-dns", action="store_true",
+                   help="Utilise la V1 (DNS probing) au lieu de Serper.")
+    p.add_argument("--limit-serper", type=int, default=None,
+                   help="Plafond d'appels Serper cette exécution.")
     p.add_argument("--ville", default="nice",
                    help="Ville cible (V1 : 'nice' uniquement).")
     p.add_argument("--naf", default=None,
@@ -116,9 +140,16 @@ def resoudre_codes_postaux(ville: str) -> list[str]:
 
 def resoudre_codes_naf(naf_csv: str | None) -> list[tuple[str, str]]:
     if naf_csv is None:
-        return [(c, NAF_LIBELLES[c]) for c in NAF_LIBELLES]
+        # Par défaut : tous les NAF connus SAUF les exclus (ex: 69.10Z).
+        return [
+            (c, NAF_LIBELLES[c])
+            for c in NAF_LIBELLES
+            if c not in NAF_EXCLUS
+        ]
     codes = [c.strip().upper() for c in naf_csv.split(",") if c.strip()]
-    # Libellé inconnu → on met le code comme libellé par défaut
+    # Libellé inconnu → on met le code comme libellé par défaut.
+    # Override explicite : on respecte le choix de l'utilisateur même pour
+    # les NAF normalement exclus (ex: --naf 69.10Z réactive les juristes).
     return [(c, NAF_LIBELLES.get(c, c)) for c in codes]
 
 
@@ -186,6 +217,28 @@ def compacter_pour_front(entreprise: dict, pappers_cache: dict) -> dict:
         or siege.get("activite_principale")
         or ""
     )
+    # V2 : champ `site` si détection Serper disponible, sinon None.
+    site_payload = None
+    if entreprise.get("_site") is not None:
+        s = entreprise.get("_site") or {}
+        site_payload = {
+            "has_site": s.get("has_site", False),
+            "detected_url": s.get("detected_url"),
+            "detected_domain": s.get("detected_domain"),
+            "reason": s.get("reason"),
+            "query_used": s.get("query_used"),
+            "top_results_count": s.get("top_results_count", 0),
+        }
+
+    # Legacy : champ `dns` seulement si l'entreprise a été traitée via check_dns.
+    dns_payload = None
+    if entreprise.get("_dns") is not None:
+        d = entreprise.get("_dns") or {}
+        dns_payload = {
+            "domaines_testes": d.get("domaines_testes") or [],
+            "domaines_resolus": d.get("domaines_resolus") or [],
+        }
+
     return {
         "siren": entreprise["siren"],
         "nom": entreprise.get("nom_complet") or entreprise.get("nom_raison_sociale"),
@@ -201,10 +254,8 @@ def compacter_pour_front(entreprise: dict, pappers_cache: dict) -> dict:
         "dirigeants_recherche": entreprise.get("dirigeants") or [],
         "classification": entreprise["classification"],
         "score": entreprise["score_affichage"],
-        "dns": {
-            "domaines_testes": (entreprise.get("_dns") or {}).get("domaines_testes") or [],
-            "domaines_resolus": (entreprise.get("_dns") or {}).get("domaines_resolus") or [],
-        },
+        "site": site_payload,
+        "dns": dns_payload,
         "pappers": extraire_pappers_pour_front(entreprise["siren"], pappers_cache),
     }
 
@@ -281,9 +332,11 @@ def main() -> int:
     codes_naf = resoudre_codes_naf(args.naf)
     pappers_active = args.enable_pappers and not args.no_pappers
 
-    print(f"🚀 Nosite pipeline V1 · {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    mode_detection = "V1 DNS (legacy)" if args.legacy_dns else "V2 Serper"
+    print(f"🚀 Nosite pipeline · {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"   Ville         : {args.ville} ({', '.join(codes_postaux)})")
     print(f"   NAF           : {', '.join(c for c, _ in codes_naf)}")
+    print(f"   Détection     : {mode_detection}")
     print(f"   Pappers       : {'ACTIVÉ' if pappers_active else 'désactivé (défaut)'}")
     if args.dry_run:
         print("   🧪 DRY-RUN : rien ne sera écrit, aucun appel réseau.")
@@ -298,19 +351,33 @@ def main() -> int:
         if extract.executer(codes_postaux, codes_naf) != 0:
             return 1
 
-    # Étape 3 — DNS
-    if args.skip_dns:
-        entete("Étape 3/5 · DNS (skippée)")
+    # Étape 3 — Détection de site (Serper V2 par défaut, DNS si --legacy-dns)
+    if args.legacy_dns:
+        if args.skip_dns:
+            entete("Étape 3/5 · DNS (skippée, mode legacy)")
+        else:
+            entete("Étape 3/5 · DNS probing (mode legacy V1)")
+            from src import check_dns
+            if check_dns.main() != 0:
+                return 1
     else:
-        entete("Étape 3/5 · DNS probing")
-        from src import check_dns
-        if check_dns.main() != 0:
-            return 1
+        if args.skip_site:
+            entete("Étape 3/5 · Détection site (skippée)")
+        else:
+            entete("Étape 3/5 · Détection site web (Serper)")
+            from src import detect_website
+            args_site = argparse.Namespace(
+                limit=args.limit_serper,
+                force=False,
+                dry_run=False,
+            )
+            if detect_website.executer(args_site) != 0:
+                return 1
 
-    # Étape 4 — scoring
+    # Étape 4 — scoring (passe le flag legacy pour forcer la lecture du bon fichier)
     entete("Étape 4/5 · Scoring & classification")
     from src import score
-    if score.main() != 0:
+    if score.main(legacy=args.legacy_dns) != 0:
         return 1
 
     # Étape 5a — Pappers (optionnel)

@@ -1066,6 +1066,71 @@ fieldset { border: 0; margin: 0; padding: 0; }
 }
 
 /* ============================================================
+   Détection site web (V2 Serper)
+   ============================================================ */
+
+.detail-site .site-verdict {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  margin-bottom: 10px;
+  line-height: 1.4;
+}
+
+.detail-site .site-verdict.site-has {
+  background: var(--probable-bg);
+  color: var(--probable);
+  border: 1px solid var(--probable);
+}
+
+.detail-site .site-verdict.site-none {
+  background: var(--tres-probable-bg);
+  color: var(--tres-probable);
+  border: 1px solid var(--tres-probable);
+}
+
+.detail-site .site-verdict a {
+  color: inherit;
+  text-decoration: underline;
+  word-break: break-all;
+}
+
+.detail-site .site-reason {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 6px;
+  line-height: 1.4;
+}
+
+.detail-site .site-query {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 8px;
+  font-family: var(--font-mono);
+}
+
+.detail-site .site-query code {
+  background: var(--surface-hover);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 10.5px;
+  color: var(--text);
+}
+
+/* Note dans le tooltip marker pour les sites détectés (ceinture de sécurité) */
+.nosite-tooltip-note {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--probable);
+  font-weight: 500;
+}
+
+/* ============================================================
    Responsive — bottom sheet sous 900px
    ============================================================ */
 

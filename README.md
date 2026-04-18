@@ -13,7 +13,7 @@ Pour pouvoir publier le code sur GitHub sans exposer la liste de nos leads :
 | Code source (Python + HTML/CSS/JS) | Repo GitHub `nosite` | 🌐 **Public** |
 | URL du Gist privé | `public/config.js` (placeholder en public, vraie URL en local) | — |
 | Liste des 151 entreprises (`data.json`) | **Gist GitHub privé** | 🔒 **Privé** |
-| Clés API (INSEE, Pappers) | `.env` local, jamais commité | 🔒 **Jamais en ligne** |
+| Clés API (INSEE, Pappers, Serper) | `.env` local, jamais commité | 🔒 **Jamais en ligne** |
 
 Le frontend GitHub Pages charge `public/config.js` (commité avec un placeholder), chaque membre remplace localement l'URL par celle du Gist, et l'UI fetch les données depuis ce Gist au démarrage.
 
@@ -47,7 +47,10 @@ Le fichier `.env` doit contenir :
 ```
 INSEE_API_KEY=...
 PAPPERS_API_KEY=...
+SERPER_API_KEY=...
 ```
+
+> `SERPER_API_KEY` est nécessaire en V2 pour la détection de site web via Google. Compte gratuit : 2500 crédits sur https://serper.dev/.
 
 ### 5. Configurer l'URL du Gist privé (local uniquement)
 
@@ -71,21 +74,26 @@ Tu dois voir `✅ Clés chargées`.
 
 ### Actualiser les données (quand tu veux rafraîchir la carte)
 
-**Pipeline complet par défaut (Pappers désactivé) :**
+**Pipeline complet V2 (Serper activé, Pappers désactivé) :**
 ```bash
 python src/main.py
 ```
 
-Enchaîne : extraction → DNS → scoring → génération de `public/data.json`. Zéro crédit consommé. Durée ≈ 15 s sur 300-500 entreprises.
+Enchaîne : extraction → **détection site web via Serper** → scoring → génération de `public/data.json`. ~1 crédit Serper par entreprise (quota gratuit 2500). Durée ≈ 1 min sur 200 entreprises.
 
 **Options utiles** :
 ```bash
-python src/main.py --dry-run             # simulation, aucun fichier écrit
-python src/main.py --skip-extract        # réutilise data/raw_entreprises.json
-python src/main.py --skip-extract --skip-dns
-python src/main.py --naf 68.31Z,70.22Z   # override NAF (CSV)
-python src/main.py --ville nice          # V1 : seule ville supportée
+python src/main.py --dry-run                   # simulation, aucun fichier écrit
+python src/main.py --skip-extract              # réutilise data/raw_entreprises.json
+python src/main.py --skip-extract --skip-site  # réutilise aussi la détection Serper
+python src/main.py --limit-serper 20           # plafonne à 20 appels Serper
+python src/main.py --legacy-dns                # fallback V1 (DNS uniquement)
+python src/main.py --naf 68.31Z,70.22Z         # override NAF (CSV)
+python src/main.py --naf 69.10Z                # réactive explicitement les juristes
+python src/main.py --ville nice                # V1 : seule ville supportée
 ```
+
+> Par défaut, le NAF 69.10Z (Activités juridiques) est exclu : les notaires et avocats ont tous un site via leurs ordres professionnels.
 
 **Push des données fraîches sur GitHub :**
 ```bash
@@ -147,39 +155,41 @@ nosite/
 │   ├── __init__.py
 │   ├── check_env.py        # vérifie .env
 │   ├── extract.py          # étape 2 — API Recherche Entreprises
-│   ├── check_dns.py        # étape 3 — DNS probing async
-│   ├── score.py            # étape 4 — classification DNS + effectif
+│   ├── detect_website.py   # étape 3 V2 — recherche Google via Serper
+│   ├── check_dns.py        # étape 3 V1 legacy — DNS probing async
+│   ├── score.py            # étape 4 — classification (Serper prioritaire)
 │   ├── enrich_pappers.py   # étape 5 — Pappers (désactivé par défaut)
 │   └── main.py             # étape 6 — orchestrateur
 ├── public/                 # servi par GitHub Pages
-│   ├── index.html          # [étape 7]
-│   ├── style.css           # [étape 7]
-│   ├── app.js              # [étape 7]
+│   ├── index.html
+│   ├── style.css
+│   ├── app.js
 │   └── data.json           # généré par Python
 └── data/
     ├── raw_entreprises.json
-    ├── entreprises_avec_dns.json
+    ├── entreprises_avec_site.json   # V2 (Serper)
+    ├── entreprises_avec_dns.json    # V1 legacy (DNS)
     ├── shortlist.json
     └── cache/              # ignoré par git
 ```
 
-### Barème de classification (V1)
+### Barème de classification (V2 Serper)
 
-Purement basé sur DNS + effectif, aucune dépendance payante :
+Priorité donnée à la recherche Google réelle via Serper. DNS reste en fallback si `--legacy-dns`.
 
-| Signal DNS | Effectif | Classification |
+| Signal Serper | Effectif | Classification |
 |---|---|---|
-| 0 domaine résolu | ≥ 10 salariés (tranches 11, 12, 21…) | **TRÈS PROBABLE** (rouge) |
-| 0 domaine résolu | < 10 salariés | **PROBABLE** (orange) |
-| Aucune variante générable (nom trop générique) | — | **À VÉRIFIER** (gris) |
-| Au moins un domaine résolu | — | **ÉCARTÉ** (non affiché) |
+| Site détecté dans le top 10 Google | — | **ÉCARTÉ** (non affiché) |
+| Aucun site trouvé | ≥ 10 salariés | **TRÈS PROBABLE** (vert) |
+| Aucun site trouvé | < 10 salariés | **PROBABLE** (jaune) |
+| Entreprise non traitée (quota/limit) | — | **À VÉRIFIER** (gris) |
 
 ### Cible de prospection
 
 - Ville : Nice (CP 06000, 06100, 06200, 06300)
 - Effectif : tranches INSEE 02, 03, 11, 12, 21
 - Entreprises actives uniquement
-- Codes NAF : 68.31Z, 70.22Z, 69.10Z, 41.20A
+- Codes NAF **par défaut** : 68.31Z, 70.22Z, 41.20A (69.10Z exclu — couvert par les ordres professionnels)
 
 ### Stockage perso
 
@@ -190,10 +200,11 @@ Chaque membre a son propre état local (contactés, notes, date de contact) stoc
 ## Statut du projet
 
 - [x] Étape 1 — Init (structure, requirements, workflow, check .env)
-- [x] Étape 2 — Extraction API Recherche Entreprises (314 entreprises à Nice)
-- [x] Étape 3 — DNS probing (151 prospects potentiels détectés)
-- [x] Étape 4 — Scoring V1 (27 TRÈS PROBABLE, 96 PROBABLE, 28 À VÉRIFIER)
-- [ ] Étape 5 — Pappers **différée** (trop coûteux en V1, voir section dédiée)
-- [x] Étape 6 — Orchestrateur main.py (pipeline complet ≈ 15 s)
-- [ ] Étape 7 — Frontend (carte Leaflet + sidebar + filtres + export CSV)
-- [ ] Étape 8 — Déploiement GitHub Pages
+- [x] Étape 2 — Extraction API Recherche Entreprises
+- [x] Étape 3 V1 — DNS probing (legacy, disponible via `--legacy-dns`)
+- [x] Étape 3 V2 — Détection de site web via Serper (Google) ✨
+- [x] Étape 4 — Scoring (V2 priorise Serper, fallback DNS)
+- [ ] Étape 5 — Pappers **différée** (trop coûteux, voir section dédiée)
+- [x] Étape 6 — Orchestrateur main.py (V2 par défaut)
+- [x] Étape 7 — Frontend (carte Leaflet + sidebar + filtres + export CSV)
+- [x] Étape 8 — Déploiement GitHub Pages

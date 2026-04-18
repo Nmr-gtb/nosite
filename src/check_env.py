@@ -21,12 +21,15 @@ def main() -> int:
 
     insee = os.getenv("INSEE_API_KEY")
     pappers = os.getenv("PAPPERS_API_KEY")
+    serper = os.getenv("SERPER_API_KEY")
 
     manquantes: list[str] = []
     if not insee:
         manquantes.append("INSEE_API_KEY")
     if not pappers:
         manquantes.append("PAPPERS_API_KEY")
+    if not serper:
+        manquantes.append("SERPER_API_KEY")
 
     if manquantes:
         print(f"❌ Clés manquantes dans .env : {', '.join(manquantes)}")
@@ -41,6 +44,7 @@ def main() -> int:
     print("✅ Clés chargées")
     print(f"   INSEE_API_KEY   : {masquer(insee)}")
     print(f"   PAPPERS_API_KEY : {masquer(pappers)}")
+    print(f"   SERPER_API_KEY  : {masquer(serper)}")
     return 0
 
 
